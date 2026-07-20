@@ -1,0 +1,41 @@
+name: Build
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  kit:
+    name: ArchiveForgeKit (build + SmokeTest)
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+      - name: swift build
+        run: swift build
+      - name: SmokeTest
+        run: swift run SmokeTest
+
+  app:
+    name: App (xcodegen + xcodebuild, both platforms)
+    runs-on: macos-14
+    needs: kit
+    steps:
+      - uses: actions/checkout@v4
+      - name: Select Xcode
+        run: sudo xcode-select -s /Applications/Xcode.app
+      - name: Install xcodegen
+        run: brew install xcodegen
+      - name: Generate Xcode project
+        run: xcodegen generate
+      - name: Build macOS target
+        run: |
+          xcodebuild -project ArchiveForge.xcodeproj -scheme ArchiveForge-macOS \
+            -destination 'platform=macOS' build \
+            CODE_SIGNING_ALLOWED=NO
+      - name: Build iOS target (simulator, unsigned)
+        run: |
+          xcodebuild -project ArchiveForge.xcodeproj -scheme ArchiveForge-iOS \
+            -destination 'generic/platform=iOS Simulator' build \
+            CODE_SIGNING_ALLOWED=NO

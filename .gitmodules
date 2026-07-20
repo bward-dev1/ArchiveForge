@@ -1,0 +1,6 @@
+[submodule "Cores/mGBA"]
+	path = Cores/mGBA
+	url = https://github.com/mgba-emu/mgba.git
+[submodule "Cores/melonDS"]
+	path = Cores/melonDS
+	url = https://github.com/melonDS-emu/melonDS.git

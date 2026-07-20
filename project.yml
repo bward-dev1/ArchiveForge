@@ -1,0 +1,62 @@
+# XcodeGen spec — generates ArchiveForge.xcodeproj (both platforms).
+# Install:  brew install xcodegen   |   Generate:  xcodegen generate
+name: ArchiveForge
+options:
+  bundleIdPrefix: com.archiveforge
+  deploymentTarget:
+    iOS: "17.0"
+    macOS: "14.0"
+  createIntermediateGroups: true
+
+packages:
+  ArchiveForgeKit:
+    path: .   # local SPM package (ArchiveForgeKit library)
+
+targets:
+  ArchiveForge-iOS:
+    type: application
+    platform: iOS
+    sources:
+      - path: Sources/ArchiveForgeApp
+      - path: Resources
+    dependencies:
+      - package: ArchiveForgeKit
+    info:
+      path: Resources/Info-iOS.plist
+      properties:
+        CFBundleDisplayName: ArchiveForge
+        UILaunchScreen: {}
+        UISupportedInterfaceOrientations~ipad:
+          - UIInterfaceOrientationPortrait
+          - UIInterfaceOrientationLandscapeLeft
+          - UIInterfaceOrientationLandscapeRight
+        UIFileSharingEnabled: true            # drop files in via Finder/Files
+        LSSupportsOpeningDocumentsInPlace: true
+        UIBackgroundModes:
+          - processing                        # keep a compress/decompress job alive when backgrounded
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.archiveforge.ios
+        SWIFT_VERSION: "6.0"
+
+  ArchiveForge-macOS:
+    type: application
+    platform: macOS
+    sources:
+      - path: Sources/ArchiveForgeApp
+      - path: Resources
+    dependencies:
+      - package: ArchiveForgeKit
+    info:
+      path: Resources/Info-macOS.plist
+      properties:
+        CFBundleDisplayName: ArchiveForge
+        LSApplicationCategoryType: public.app-category.utilities
+        NSHumanReadableCopyright: ""
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.archiveforge.mac
+        SWIFT_VERSION: "6.0"
+        ENABLE_HARDENED_RUNTIME: true
+        ENABLE_APP_SANDBOX: true
+        CODE_SIGN_ENTITLEMENTS: Resources/ArchiveForge-macOS.entitlements
