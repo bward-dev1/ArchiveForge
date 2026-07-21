@@ -75,6 +75,17 @@ public enum JobMode: String, CaseIterable, Identifiable {
     }
 }
 
+/// A real struct, not a bare `(JobCheckpoint, [BatchItemResult])` tuple —
+/// tuples have had real Sendability-inference gaps across Swift 6.x point
+/// releases (unlike nominal types, which get unambiguous, checked
+/// conformance), and this was the actual fix for a "sending" error that
+/// survived several other restructurings and even a newer Xcode/Swift
+/// version. A named `Sendable` struct sidesteps the ambiguity entirely.
+struct JobRunResult: Sendable {
+    let checkpoint: JobCheckpoint
+    let results: [BatchItemResult]
+}
+
 /// Drives the queue shown in ContentView. Two things make a job
 /// background-safe, together:
 ///
@@ -169,17 +180,17 @@ final class JobQueueViewModel {
         }
 
         Task { @MainActor [weak self] in
-            let (resultCheckpoint, results) = await jobTask.value
+            let jobResult = await jobTask.value
             progressContinuation.finish()
             guard let self else { return }
-            self.reportFailures(in: results)
+            self.reportFailures(in: jobResult.results)
             self.isRunning = false
             self.endBackgroundTaskIfNeeded()
             // Cancelled mid-resume leaves a still-incomplete checkpoint —
             // same as a fresh cancellation, surface it as resumable again
             // rather than silently dropping it.
-            if !resultCheckpoint.isComplete {
-                self.resumableCheckpoint = resultCheckpoint
+            if !jobResult.checkpoint.isComplete {
+                self.resumableCheckpoint = jobResult.checkpoint
             }
         }
     }
@@ -260,10 +271,10 @@ final class JobQueueViewModel {
         }
 
         Task { @MainActor [weak self] in
-            let (resultCheckpoint, results) = await jobTask.value
+            let jobResult = await jobTask.value
             progressContinuation.finish()
             guard let self else { return }
-            for result in results {
+            for result in jobResult.results {
                 guard let item = byURL[result.archive] else { continue }
                 switch result.outcome {
                 case .success:
@@ -276,8 +287,8 @@ final class JobQueueViewModel {
             }
             self.isRunning = false
             self.endBackgroundTaskIfNeeded()
-            if !resultCheckpoint.isComplete {
-                self.resumableCheckpoint = resultCheckpoint
+            if !jobResult.checkpoint.isComplete {
+                self.resumableCheckpoint = jobResult.checkpoint
             }
         }
     }
@@ -306,28 +317,31 @@ final class JobQueueViewModel {
     nonisolated private static func runDecompressJob(
         archives: [URL], destination: URL, store: CheckpointStore, flag: CancellationFlag,
         progressContinuation: AsyncStream<BatchProgress>.Continuation
-    ) -> (JobCheckpoint, [BatchItemResult]) {
-        ResumableJobRunner.startDecompress(
+    ) -> JobRunResult {
+        let (checkpoint, results) = ResumableJobRunner.startDecompress(
             archives: archives, destinationDirectory: destination, store: store
         ) { progressContinuation.yield($0) } shouldCancel: { flag.isCancelled() }
+        return JobRunResult(checkpoint: checkpoint, results: results)
     }
 
     nonisolated private static func runCompressJob(
         files: [URL], destination: URL, format: ArchiveFormat, store: CheckpointStore, flag: CancellationFlag,
         progressContinuation: AsyncStream<BatchProgress>.Continuation
-    ) -> (JobCheckpoint, [BatchItemResult]) {
-        ResumableJobRunner.startCompress(
+    ) -> JobRunResult {
+        let (checkpoint, results) = ResumableJobRunner.startCompress(
             files: files, destinationDirectory: destination, format: format, store: store
         ) { progressContinuation.yield($0) } shouldCancel: { flag.isCancelled() }
+        return JobRunResult(checkpoint: checkpoint, results: results)
     }
 
     nonisolated private static func runResumeJob(
         checkpoint: JobCheckpoint, store: CheckpointStore, flag: CancellationFlag,
         progressContinuation: AsyncStream<BatchProgress>.Continuation
-    ) -> (JobCheckpoint, [BatchItemResult]) {
-        ResumableJobRunner.resume(
+    ) -> JobRunResult {
+        let (resultCheckpoint, results) = ResumableJobRunner.resume(
             checkpoint, store: store
         ) { progressContinuation.yield($0) } shouldCancel: { flag.isCancelled() }
+        return JobRunResult(checkpoint: resultCheckpoint, results: results)
     }
 
     // MARK: - Background execution time (iOS)

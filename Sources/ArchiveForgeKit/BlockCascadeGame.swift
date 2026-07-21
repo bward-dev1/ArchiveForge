@@ -19,7 +19,7 @@ public struct BlockCascadeGame: Sendable {
         var originCol: Int
         var originRow: Int
 
-        func occupiedCells() -> [(Int, Int)] {
+        public func occupiedCells() -> [(Int, Int)] {
             cells.map { (originCol + $0.0, originRow + $0.1) }
         }
     }
