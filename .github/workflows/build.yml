@@ -23,10 +23,16 @@ jobs:
     needs: kit
     steps:
       - uses: actions/checkout@v4
-      - name: List available Xcode versions
-        run: ls /Applications | grep -i Xcode
       - name: Select Xcode
-        run: sudo xcode-select -s /Applications/Xcode.app
+        # The default /Applications/Xcode.app on this runner resolves to
+        # Swift 6.1.2, which has stricter (and, per local testing against
+        # Swift 6.3.3, since-relaxed) "sending"-parameter concurrency
+        # diagnostics than this code was actually verified against — see
+        # the commits leading up to this one for the real errors that
+        # triggered this investigation. Xcode 26.3 carries a Swift compiler
+        # from the same generation as the one this code was checked
+        # against locally.
+        run: sudo xcode-select -s /Applications/Xcode_26.3.app
       - name: Swift version actually in use
         run: swift --version
       - name: Install xcodegen
