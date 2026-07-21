@@ -199,7 +199,15 @@ final class JobQueueViewModel {
             let urls = itemsSnapshot.map(\.url)
             let byURL = Dictionary(uniqueKeysWithValues: itemsSnapshot.map { ($0.url, $0) })
 
-            func onProgress(_ p: BatchProgress) {
+            // A @Sendable closure literal, not a nested `func` — Swift 6
+            // doesn't infer Sendable conformance for nested functions the
+            // same way it does for closure literals, even when their
+            // captures (byURL, urls: a Dictionary/Array of Sendable
+            // elements) are genuinely safe to share. This exact mismatch is
+            // real and CI-caught: it compiles fine via `swift build` (this
+            // file isn't part of that target graph at all), so only a real
+            // Xcode build ever surfaced it.
+            let onProgress: @Sendable (BatchProgress) -> Void = { p in
                 guard let item = byURL[urls[p.currentArchiveIndex]] else { return }
                 Task { @MainActor in
                     item.status = .running
