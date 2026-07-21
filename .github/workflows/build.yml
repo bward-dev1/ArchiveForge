@@ -9,7 +9,7 @@ on:
 jobs:
   kit:
     name: ArchiveForgeKit (build + SmokeTest)
-    runs-on: macos-14
+    runs-on: macos-15
     steps:
       - uses: actions/checkout@v4
       - name: swift build
@@ -19,7 +19,7 @@ jobs:
 
   app:
     name: App (xcodegen + xcodebuild, both platforms)
-    runs-on: macos-14
+    runs-on: macos-15
     needs: kit
     steps:
       - uses: actions/checkout@v4
