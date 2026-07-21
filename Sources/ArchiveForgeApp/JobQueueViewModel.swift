@@ -6,7 +6,16 @@ import UIKit
 #endif
 
 /// One file the user has queued, plus its own real-time status — the model
-/// backing the sequential batch list in the UI.
+/// backing the sequential batch list in the UI. `@MainActor`-isolated (not
+/// just conventionally-only-touched-there): every real mutation of `status`/
+/// `fractionComplete` already happens inside `Task { @MainActor in ... }`
+/// blocks in JobQueueViewModel, so this makes that invariant something the
+/// compiler enforces, and — the reason it matters here specifically —
+/// MainActor isolation is what lets a reference to this class be captured
+/// inside a `@Sendable` closure at all (opaque access only, no touching its
+/// properties without hopping back to MainActor first, exactly what the
+/// code already does).
+@MainActor
 @Observable
 final class QueuedItem: Identifiable {
     let id = UUID()
