@@ -141,23 +141,49 @@ final class JobQueueViewModel {
         resumableCheckpoint = nil
         cancelFlag.reset()
 
+        let store = checkpointStore
+        let flag = cancelFlag
         beginBackgroundTaskIfNeeded()
-        Task.detached { [weak self, checkpointStore, cancelFlag] in
-            let (resultCheckpoint, results) = ResumableJobRunner.resume(checkpoint, store: checkpointStore) { progress in
-                Task { @MainActor in self?.overallFraction = progress.overallFractionComplete }
+
+        // AsyncStream, not a captured `self` inside Task.detached: Swift 6's
+        // "sending" checker flags a `[weak self]` capture on a .detached
+        // closure as a data-race risk even when the actual touch of `self`
+        // is buried inside a nested `MainActor.run` — real, CI-caught error
+        // (see the commit this comment landed in). The fix isn't a smaller
+        // capture list, it's not capturing `self` into the detached closure
+        // at all: the producer below is 100% self-free (only genuinely
+        // Sendable value captures), and two separate, naturally-MainActor
+        // Tasks (declared directly in this @MainActor method, so `self`
+        // needs no capture-list gymnastics at all) consume the stream and
+        // the final awaited result.
+        let (progressStream, progressContinuation) = AsyncStream<BatchProgress>.makeStream()
+
+        let jobTask = Task.detached {
+            ResumableJobRunner.resume(checkpoint, store: store) { progress in
+                progressContinuation.yield(progress)
             } shouldCancel: {
-                cancelFlag.isCancelled()
+                flag.isCancelled()
             }
-            await MainActor.run {
-                self?.reportFailures(in: results)
-                self?.isRunning = false
-                self?.endBackgroundTaskIfNeeded()
-                // Cancelled mid-resume leaves a still-incomplete checkpoint —
-                // same as a fresh cancellation, surface it as resumable again
-                // rather than silently dropping it.
-                if !resultCheckpoint.isComplete {
-                    self?.resumableCheckpoint = resultCheckpoint
-                }
+        }
+
+        Task { @MainActor [weak self] in
+            for await progress in progressStream {
+                self?.overallFraction = progress.overallFractionComplete
+            }
+        }
+
+        Task { @MainActor [weak self] in
+            let (resultCheckpoint, results) = await jobTask.value
+            progressContinuation.finish()
+            guard let self else { return }
+            self.reportFailures(in: results)
+            self.isRunning = false
+            self.endBackgroundTaskIfNeeded()
+            // Cancelled mid-resume leaves a still-incomplete checkpoint —
+            // same as a fresh cancellation, surface it as resumable again
+            // rather than silently dropping it.
+            if !resultCheckpoint.isComplete {
+                self.resumableCheckpoint = resultCheckpoint
             }
         }
     }
@@ -201,60 +227,69 @@ final class JobQueueViewModel {
         let format = self.format
         let destination = self.destinationDirectory
         let itemsSnapshot = items
+        let urls = itemsSnapshot.map(\.url)
+        let byURL = Dictionary(uniqueKeysWithValues: itemsSnapshot.map { ($0.url, $0) })
         let store = checkpointStore
+        let flag = cancelFlag
 
         beginBackgroundTaskIfNeeded()
-        Task.detached { [weak self, cancelFlag] in
-            let urls = itemsSnapshot.map(\.url)
-            let byURL = Dictionary(uniqueKeysWithValues: itemsSnapshot.map { ($0.url, $0) })
 
-            // A @Sendable closure literal, not a nested `func` — Swift 6
-            // doesn't infer Sendable conformance for nested functions the
-            // same way it does for closure literals, even when their
-            // captures (byURL, urls: a Dictionary/Array of Sendable
-            // elements) are genuinely safe to share. This exact mismatch is
-            // real and CI-caught: it compiles fine via `swift build` (this
-            // file isn't part of that target graph at all), so only a real
-            // Xcode build ever surfaced it.
-            let onProgress: @Sendable (BatchProgress) -> Void = { p in
-                guard let item = byURL[urls[p.currentArchiveIndex]] else { return }
-                Task { @MainActor in
-                    item.status = .running
-                    item.fractionComplete = p.currentArchiveProgress.fractionComplete
-                    self?.overallFraction = p.overallFractionComplete
-                }
-            }
+        // Same AsyncStream restructuring as resumeInterruptedJob() — see
+        // that function's comment for why: a `[weak self]` capture on a
+        // Task.detached closure is a real, CI-caught Swift 6 "sending self"
+        // error even when the actual self-touch is buried inside a nested
+        // MainActor block. `jobTask` below is 100% self-free (only Sendable
+        // value captures); `byURL` (keyed on QueuedItem, not Sendable) is
+        // used only in the two naturally-MainActor consumer Tasks, never
+        // inside the detached producer.
+        let (progressStream, progressContinuation) = AsyncStream<BatchProgress>.makeStream()
 
+        let jobTask = Task.detached {
+            let onProgress: @Sendable (BatchProgress) -> Void = { progressContinuation.yield($0) }
             let results: [BatchItemResult]
             let resultCheckpoint: JobCheckpoint
             switch mode {
             case .decompress:
                 (resultCheckpoint, results) = ResumableJobRunner.startDecompress(
                     archives: urls, destinationDirectory: destination, store: store, progress: onProgress
-                ) { cancelFlag.isCancelled() }
+                ) { flag.isCancelled() }
             case .compress:
                 (resultCheckpoint, results) = ResumableJobRunner.startCompress(
                     files: urls, destinationDirectory: destination, format: format, store: store, progress: onProgress
-                ) { cancelFlag.isCancelled() }
+                ) { flag.isCancelled() }
             }
+            return (resultCheckpoint, results)
+        }
 
-            await MainActor.run {
-                for result in results {
-                    guard let item = byURL[result.archive] else { continue }
-                    switch result.outcome {
-                    case .success:
-                        item.status = .done
-                        item.fractionComplete = 1
-                    case .failure(let error):
-                        item.status = .failed(error.localizedDescription)
-                        self?.lastErrorMessage = error.localizedDescription
-                    }
+        Task { @MainActor [weak self] in
+            for await progress in progressStream {
+                guard progress.currentArchiveIndex < urls.count,
+                      let item = byURL[urls[progress.currentArchiveIndex]] else { continue }
+                item.status = .running
+                item.fractionComplete = progress.currentArchiveProgress.fractionComplete
+                self?.overallFraction = progress.overallFractionComplete
+            }
+        }
+
+        Task { @MainActor [weak self] in
+            let (resultCheckpoint, results) = await jobTask.value
+            progressContinuation.finish()
+            guard let self else { return }
+            for result in results {
+                guard let item = byURL[result.archive] else { continue }
+                switch result.outcome {
+                case .success:
+                    item.status = .done
+                    item.fractionComplete = 1
+                case .failure(let error):
+                    item.status = .failed(error.localizedDescription)
+                    self.lastErrorMessage = error.localizedDescription
                 }
-                self?.isRunning = false
-                self?.endBackgroundTaskIfNeeded()
-                if !resultCheckpoint.isComplete {
-                    self?.resumableCheckpoint = resultCheckpoint
-                }
+            }
+            self.isRunning = false
+            self.endBackgroundTaskIfNeeded()
+            if !resultCheckpoint.isComplete {
+                self.resumableCheckpoint = resultCheckpoint
             }
         }
     }
