@@ -159,11 +159,7 @@ final class JobQueueViewModel {
         let (progressStream, progressContinuation) = AsyncStream<BatchProgress>.makeStream()
 
         let jobTask = Task.detached {
-            ResumableJobRunner.resume(checkpoint, store: store) { progress in
-                progressContinuation.yield(progress)
-            } shouldCancel: {
-                flag.isCancelled()
-            }
+            Self.runResumeJob(checkpoint: checkpoint, store: store, flag: flag, progressContinuation: progressContinuation)
         }
 
         Task { @MainActor [weak self] in
@@ -245,20 +241,12 @@ final class JobQueueViewModel {
         let (progressStream, progressContinuation) = AsyncStream<BatchProgress>.makeStream()
 
         let jobTask = Task.detached {
-            let onProgress: @Sendable (BatchProgress) -> Void = { progressContinuation.yield($0) }
-            let results: [BatchItemResult]
-            let resultCheckpoint: JobCheckpoint
             switch mode {
             case .decompress:
-                (resultCheckpoint, results) = ResumableJobRunner.startDecompress(
-                    archives: urls, destinationDirectory: destination, store: store, progress: onProgress
-                ) { flag.isCancelled() }
+                return Self.runDecompressJob(archives: urls, destination: destination, store: store, flag: flag, progressContinuation: progressContinuation)
             case .compress:
-                (resultCheckpoint, results) = ResumableJobRunner.startCompress(
-                    files: urls, destinationDirectory: destination, format: format, store: store, progress: onProgress
-                ) { flag.isCancelled() }
+                return Self.runCompressJob(files: urls, destination: destination, format: format, store: store, flag: flag, progressContinuation: progressContinuation)
             }
-            return (resultCheckpoint, results)
         }
 
         Task { @MainActor [weak self] in
@@ -300,6 +288,46 @@ final class JobQueueViewModel {
                 lastErrorMessage = error.localizedDescription
             }
         }
+    }
+
+    // MARK: - Job execution (nonisolated)
+
+    /// Explicitly `nonisolated`, not just "no self captured": since
+    /// `JobQueueViewModel` itself is `@MainActor`, a plain static func
+    /// declared inside it would still *inherit* MainActor isolation by
+    /// default. That's the real, CI-caught root cause behind the "sending"
+    /// errors in `start()`/`resumeInterruptedJob()` — even a self-free
+    /// closure body still references locals from an actor-isolated calling
+    /// scope, which Swift 6's region-isolation checker treats far more
+    /// strictly than plain function-argument passing. These three helpers
+    /// take every value as an explicit, provably-Sendable parameter instead
+    /// of a closure capture, which is the actually-robust fix, not a
+    /// smaller capture list.
+    nonisolated private static func runDecompressJob(
+        archives: [URL], destination: URL, store: CheckpointStore, flag: CancellationFlag,
+        progressContinuation: AsyncStream<BatchProgress>.Continuation
+    ) -> (JobCheckpoint, [BatchItemResult]) {
+        ResumableJobRunner.startDecompress(
+            archives: archives, destinationDirectory: destination, store: store
+        ) { progressContinuation.yield($0) } shouldCancel: { flag.isCancelled() }
+    }
+
+    nonisolated private static func runCompressJob(
+        files: [URL], destination: URL, format: ArchiveFormat, store: CheckpointStore, flag: CancellationFlag,
+        progressContinuation: AsyncStream<BatchProgress>.Continuation
+    ) -> (JobCheckpoint, [BatchItemResult]) {
+        ResumableJobRunner.startCompress(
+            files: files, destinationDirectory: destination, format: format, store: store
+        ) { progressContinuation.yield($0) } shouldCancel: { flag.isCancelled() }
+    }
+
+    nonisolated private static func runResumeJob(
+        checkpoint: JobCheckpoint, store: CheckpointStore, flag: CancellationFlag,
+        progressContinuation: AsyncStream<BatchProgress>.Continuation
+    ) -> (JobCheckpoint, [BatchItemResult]) {
+        ResumableJobRunner.resume(
+            checkpoint, store: store
+        ) { progressContinuation.yield($0) } shouldCancel: { flag.isCancelled() }
     }
 
     // MARK: - Background execution time (iOS)
